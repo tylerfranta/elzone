@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>EL ZONE METER</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&family=Archivo+Narrow:wght@500;700&display=swap');
+
+  :root{
+    --bg:#08090b;
+    --panel:#101317;
+    --line:#1e242b;
+    --txt:#c8ced6;
+    --dim:#5c6571;
+    --accent:#ff5b2e;
+    --mono:'Archivo Narrow',sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;background:var(--bg);color:var(--txt);font-family:'Archivo',sans-serif;overflow:hidden;}
+
+  /* App container — normal portrait column, NO force-rotation, so the camera
+     feed always displays in the phone's native orientation and can never come
+     through sideways. The phone is held rotation-locked and turned LEFT-SIDE-
+     DOWN; in that grip the control strip (placed at the top of the portrait
+     column) lands on the physical LEFT as a vertical strip: the EL Zone scale
+     reads as a vertical gradient at the top with the two icon buttons below.
+     Label/icon/notice text is rotated 90° so it reads upright in this grip. */
+  #app{display:flex;flex-direction:column;width:100%;height:100%;}
+
+  /* camera fills the main area */
+  #stage{position:relative;flex:1;min-height:0;background:#000;overflow:hidden;}
+  #frame{position:absolute;inset:0;overflow:hidden;}
+  #video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;}
+  #overlay{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;image-rendering:auto;}
+  #sample{display:none;}
+
+  /* ---- control strip (top of portrait = physical left): buttons + scale ---- */
+  #controls{display:flex;align-items:center;gap:12px;background:var(--panel);
+    border-bottom:1px solid var(--line);padding:calc(8px + env(safe-area-inset-top)) 12px 8px;}
+  #scaleWrap{flex:1;min-width:0;}
+  #legend{display:flex;gap:2px;height:15px;}
+  #legend div{flex:1;min-width:0;border-radius:2px;}
+  #legendLabels{display:flex;gap:2px;margin-top:5px;}
+  #legendLabels div{flex:1;min-width:0;text-align:center;font-family:var(--mono);font-size:8.5px;font-weight:700;color:var(--dim);
+    white-space:nowrap;transform:rotate(90deg);}
+
+  /* icon buttons */
+  #btns{display:flex;gap:8px;flex:0 0 auto;}
+  .iconbtn{width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--bg);
+    color:var(--txt);display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;
+    transition:background .12s,border-color .12s,color .12s;touch-action:manipulation;}
+  .iconbtn svg{width:19px;height:19px;display:block;transform:rotate(90deg);}
+  .iconbtn:active{transform:scale(.93);}
+  #startBtn{background:var(--accent);border-color:var(--accent);color:#000;}
+  #startBtn.running{background:var(--bg);border-color:var(--line);color:var(--txt);}
+  .iconbtn.active{background:var(--txt);border-color:var(--txt);color:#000;}
+
+  /* startup notice */
+  #notice{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:var(--bg);}
+  #notice .inner{display:flex;flex-direction:column;align-items:center;justify-content:center;
+    text-align:center;gap:14px;padding:20px;transform:rotate(90deg);max-width:90vh;}
+  #notice h1{font-family:var(--mono);font-weight:700;font-size:26px;letter-spacing:2px;text-transform:uppercase;}
+  #notice .sub{font-size:13px;color:var(--dim);line-height:1.55;max-width:300px;}
+  #notice .tag{font-family:var(--mono);color:var(--accent);font-size:11px;letter-spacing:3px;text-transform:uppercase;}
+</style>
+</head>
+<body>
+ <div id="app">
+  <div id="controls">
+    <div id="btns">
+      <button class="iconbtn" id="startBtn" title="Start / stop camera" aria-label="Start camera">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+      <button class="iconbtn active" id="ovBtn" title="Toggle false-color overlay" aria-label="Toggle overlay">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>
+      </button>
+    </div>
+    <div id="scaleWrap">
+      <div id="legend"></div>
+      <div id="legendLabels"></div>
+    </div>
+  </div>
+
+  <div id="stage">
+   <div id="frame">
+    <video id="video" playsinline muted></video>
+    <canvas id="overlay"></canvas>
+    <canvas id="sample"></canvas>
+    <div id="notice">
+     <div class="inner">
+      <div class="tag">EL ZONE · SCOUT</div>
+      <h1>Light Meter</h1>
+      <div class="sub">Live false-color exposure mapping from your phone camera. A relative scouting reference — the preview is tone-mapped by iOS, not true Log, so treat zones as ballpark, not calibrated.</div>
+     </div>
+    </div>
+   </div>
+  </div>
+ </div>
+
+<script>
+/* ============================================================
+   EL ZONE System — Ed Lachman's scale, matched to reference.
+   15 bands: black(-6) purple(-5) blue(-4) ltblue(-3)
+   dkgreen(-2) green(-1) brightgreen(-½) GRAY(0)
+   yellow(+½) paleyellow(+1) orange(+2) ltorange(+3)
+   red(+4) brightred(+5) white(+6).
+   Half-stop bands (±½) flank the gray center.
+   Stop value = log2(scene-linear L / 0.18).
+   ============================================================ */
+const BANDS = [
+  {min:-7.0, max:-5.5, color:[ 12, 12, 12], name:'-6'},   // black
+  {min:-5.5, max:-4.5, color:[120, 55,165], name:'-5'},   // purple
+  {min:-4.5, max:-3.5, color:[ 38, 78,150], name:'-4'},   // dark blue
+  {min:-3.5, max:-2.5, color:[ 70,150,205], name:'-3'},   // light blue
+  {min:-2.5, max:-1.5, color:[ 40,120, 60], name:'-2'},   // dark green
+  {min:-1.5, max:-0.75,color:[ 70,175, 75], name:'-1'},   // mid green
+  {min:-0.75,max:-0.25,color:[ 95,210, 70], name:'-½'},   // bright green
+  {min:-0.25,max: 0.25,color:[150,150,150], name:'0'},    // gray (center)
+  {min: 0.25,max: 0.75,color:[235,225, 70], name:'+½'},   // yellow
+  {min: 0.75,max: 1.5, color:[245,235,150], name:'+1'},   // pale yellow
+  {min: 1.5,  max: 2.5,color:[240,160, 50], name:'+2'},   // orange
+  {min: 2.5,  max: 3.5,color:[245,180, 70], name:'+3'},   // lighter orange
+  {min: 3.5,  max: 4.5,color:[215, 45, 40], name:'+4'},   // red
+  {min: 4.5,  max: 5.5,color:[240, 70, 60], name:'+5'},   // bright red
+  {min: 5.5,  max: 9.0,color:[245,245,245], name:'+6'},   // white
+];
+const LEGEND = BANDS;
+
+/* sRGB-decode → scene-stop with knee-based highlight expansion.
+   The iOS preview is display-referred sRGB and compresses the scene's
+   highlight range, so a naive mapping caps white near +2.5 stops and the
+   warm bands never appear. We can't get a true Log feed in a browser, so
+   we APPROXIMATE the missing highlight range — but carefully:
+
+   - At and below middle gray, and up to +1 stop, the reading is left TRUE,
+     so middle gray (0) and ±½ stop land accurately. This is the range you
+     judge a subject/interview face against, so it must be honest.
+   - Only ABOVE a +1 stop knee do we accelerate the mapping, stretching the
+     preview's compressed top end out across +2…+6 so hot windows and skies
+     read as the warm/white bands instead of bunching at +2.
+
+   This is a model, not a measurement — but it keeps the decision-critical
+   midtones accurate and gives a usable read on where highlights run hot. */
+function srgbToLinear(c){ c/=255; return c<=0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055,2.4); }
+
+const KNEE = 1.0;        // below this (in stops) readings are true to scene
+const KNEE_EXP = 1.5;    // expansion curve steepness above the knee
+const PREVIEW_MAX = 2.5; // approx max stops the sRGB preview can represent
+const TARGET_MAX = 6.0;  // map the compressed top out to the +6 band
+
+function sceneStop(r,g,b){
+  const L = 0.2126*srgbToLinear(r) + 0.7152*srgbToLinear(g) + 0.0722*srgbToLinear(b);
+  if(L<=0) return -7;
+  let stop = Math.log2(L/0.18);          // true scene stop (0.18 = middle gray)
+  if(stop>KNEE){
+    const over = stop-KNEE;
+    const avail = PREVIEW_MAX-KNEE;      // input headroom the preview holds
+    const want  = TARGET_MAX-KNEE;       // output range to spread across
+    const norm  = Math.min(1, over/avail);
+    stop = KNEE + Math.pow(norm,KNEE_EXP)*want;
+  }
+  return Math.max(-7, Math.min(8.5, stop));
+}
+function colorFor(stop){
+  for(const band of BANDS){ if(stop>=band.min && stop<band.max) return band; }
+  return BANDS[stop<0?0:BANDS.length-1];
+}
+
+/* ---------- DOM ---------- */
+const video=document.getElementById('video');
+const overlay=document.getElementById('overlay');
+const octx=overlay.getContext('2d');
+const sample=document.getElementById('sample');
+const sctx=sample.getContext('2d',{willReadFrequently:true});
+const SW=600; // downsample width for processing (higher = finer overlay)
+let SH=338;
+let stream=null, running=false, showOverlay=true;
+
+function buildLegend(){
+  const bar=document.getElementById('legend'); bar.innerHTML='';
+  const labs=document.getElementById('legendLabels'); labs.innerHTML='';
+  LEGEND.forEach(b=>{
+    const d=document.createElement('div');
+    d.style.background=`rgb(${b.color[0]},${b.color[1]},${b.color[2]})`;
+    bar.appendChild(d);
+
+    const l=document.createElement('div');
+    l.textContent=b.name;
+    labs.appendChild(l);
+  });
+}
+buildLegend();
+
+document.getElementById('ovBtn').addEventListener('click',e=>{
+  showOverlay=!showOverlay;
+  e.target.classList.toggle('active',showOverlay);
+  overlay.style.display=showOverlay?'block':'none';
+});
+
+const startBtn=document.getElementById('startBtn');
+const ICON_PLAY='<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+const ICON_STOP='<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+startBtn.addEventListener('click',()=>{ running?stopCam():startCam(); });
+
+async function startCam(){
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720}},audio:false
+    });
+    video.srcObject=stream;
+    await video.play();
+    document.getElementById('notice').style.display='none';
+    startBtn.innerHTML=ICON_STOP;
+    startBtn.classList.add('running');
+    running=true;
+    requestAnimationFrame(loop);
+  }catch(err){
+    document.querySelector('#notice .sub').textContent='Camera access denied or unavailable. Allow camera permission and reload.';
+  }
+}
+function stopCam(){
+  running=false;
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
+  startBtn.innerHTML=ICON_PLAY;
+  startBtn.classList.remove('running');
+}
+
+function loop(){
+  if(!running) return;
+  const vw=video.videoWidth, vh=video.videoHeight;
+  if(vw&&vh){
+    SH=Math.round(SW*vh/vw);
+    sample.width=SW; sample.height=SH;
+    // overlay at higher res for smooth upscaled gradients
+    const OW=Math.min(1280, SW*2), OH=Math.round(OW*vh/vw);
+    if(overlay.width!==OW){ overlay.width=OW; overlay.height=OH; }
+    sctx.drawImage(video,0,0,SW,SH);
+    const img=sctx.getImageData(0,0,SW,SH);
+    const d=img.data;
+    for(let p=0;p<d.length;p+=4){
+      const stop=sceneStop(d[p],d[p+1],d[p+2]);
+      const band=colorFor(stop);
+      d[p]=band.color[0]; d[p+1]=band.color[1]; d[p+2]=band.color[2];
+    }
+    if(showOverlay){
+      // write processed bands back into the small sample buffer...
+      sctx.putImageData(img,0,0);
+      // ...then draw it scaled up with smoothing for soft gradient edges
+      octx.clearRect(0,0,overlay.width,overlay.height);
+      octx.imageSmoothingEnabled=true;
+      octx.imageSmoothingQuality='high';
+      octx.drawImage(sample,0,0,SW,SH,0,0,overlay.width,overlay.height);
+    } else {
+      octx.clearRect(0,0,overlay.width,overlay.height);
+    }
+  }
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
